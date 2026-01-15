@@ -5,15 +5,25 @@ interface VisualizerProps {
   state: VisualizerState;
 }
 
-// Helper for smooth interpolation
+// Helper: Linear Interpolation for smooth animation
 const lerp = (start: number, end: number, factor: number) => start + (end - start) * factor;
+
+// Helper: Organic Noise function (Sum of sines)
+// More complexity = more "liquid" feel
+const getWaveHeight = (x: number, t: number, frequency: number, complexity: number) => {
+  let y = Math.sin(x * frequency + t);
+  if (complexity > 1) y += Math.sin(x * frequency * 2.1 + t * 1.5) * 0.5;
+  if (complexity > 2) y += Math.sin(x * frequency * 1.72 - t * 0.4) * 0.3; 
+  if (complexity > 3) y += Math.sin(x * frequency * 3.5 + t * 2.0) * 0.1; // Fine detail
+  return y;
+};
 
 const Visualizer: React.FC<VisualizerProps> = ({ state }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef<number>(0);
   
-  // Physics state
-  const volumeRef = useRef(0); 
+  // Physics State Refs (to keep values between renders)
+  const volumeRef = useRef(0);
   const timeRef = useRef(0);
 
   useEffect(() => {
@@ -23,119 +33,98 @@ const Visualizer: React.FC<VisualizerProps> = ({ state }) => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    // Configuration for the "Aurora" layers
+    const WAVE_LAYERS = [
+      // Base Layer: Deep Ocean (Slow, wide)
+      { color: 'rgba(30, 58, 138, 0.5)', speed: 0.002, freq: 0.0015, ampScale: 0.2, yOffset: 40 }, 
+      // Mid Layer: Indigo Mist (Medium speed)
+      { color: 'rgba(99, 102, 241, 0.4)', speed: 0.004, freq: 0.0025, ampScale: 0.5, yOffset: 60 },
+      // Top Layer: Violet Ether (Fastest, reactive)
+      { color: 'rgba(167, 139, 250, 0.35)', speed: 0.007, freq: 0.0035, ampScale: 0.8, yOffset: 90 },
+      // Highlight Layer: Cyan tint (Only visible when loud)
+      { color: 'rgba(34, 211, 238, 0.2)', speed: 0.01, freq: 0.005, ampScale: 1.0, yOffset: 100 },
+    ];
+
     const resize = () => {
-      // Handle high DPI displays for crisp edges
-      const dpr = window.devicePixelRatio || 1;
+      // Lower DPR creates a softer, more analog look which is good for this effect
+      const dpr = 1; 
       canvas.width = window.innerWidth * dpr;
       canvas.height = window.innerHeight * dpr;
       ctx.scale(dpr, dpr);
-      canvas.style.width = `${window.innerWidth}px`;
-      canvas.style.height = `${window.innerHeight}px`;
     };
     window.addEventListener('resize', resize);
     resize();
 
     const draw = () => {
-      timeRef.current += 0.008; // Silky slow movement
-      const t = timeRef.current;
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+
+      // 1. Physics & Time Update
+      // Smooth volume interpolation
+      const targetVol = state.volume > 0.01 ? Math.min(state.volume * 2.5, 1.5) : 0;
+      // Fast attack, very slow release for "lingering" feel
+      const lerpFactor = targetVol > volumeRef.current ? 0.15 : 0.03;
+      volumeRef.current = lerp(volumeRef.current, targetVol, lerpFactor);
       
-      // Smooth Volume Transition
-      const targetVol = state.volume > 0.01 ? Math.min(state.volume * 2.0, 1) : 0;
-      volumeRef.current = lerp(volumeRef.current, targetVol, 0.08); // Slightly faster response for "lively" feel
       const vol = volumeRef.current;
-
-      const width = window.innerWidth;
-      const height = window.innerHeight;
-
-      ctx.clearRect(0, 0, width, height);
-
-      // Only draw if there is some volume or to maintain a faint "breathing" border
-      const activeState = vol > 0.01 || state.isTalking;
       
-      // Configuration for the "Silk"
-      // We draw waves on all 4 edges.
-      // Top, Right, Bottom, Left
-      
-      const layers = 3; // Number of overlapping silk sheets
-      const maxReach = Math.min(width, height) * 0.15; // Max distance inward from edge
-      
-      // Colors: Deep, mysterious, not bright.
-      // Idle: Transparent.
-      // Active: Indigo/Violet/Cyan gradient feels.
-      
-      ctx.globalCompositeOperation = 'screen'; // Soft glowing blending
-      
-      // Function to draw a wave along an edge
-      const drawEdge = (edge: 'top' | 'right' | 'bottom' | 'left') => {
-        for (let i = 0; i < layers; i++) {
-            ctx.beginPath();
-            
-            // Color calculation based on layer and state
-            // Layer 0: Inner core (brighter), Layer 2: Outer mist (fainter)
-            const alpha = activeState 
-                ? (0.15 - i * 0.03) + (vol * 0.2) // Volume boosts alpha
-                : 0.02; // Very faint idle state
-            
-            // Hue shift: 
-            // AI (Talking) -> Warm/Purple (260-300)
-            // User -> Cool/Cyan (180-220)
-            const baseHue = state.isTalking ? 270 : 200;
-            const hue = baseHue + (i * 15) + Math.sin(t) * 10;
-            
-            ctx.fillStyle = `hsla(${hue}, 60%, 60%, ${alpha})`;
+      // Time moves faster when loud
+      const timeSpeed = 0.5 + (vol * 1.5); 
+      timeRef.current += 0.008 * timeSpeed;
+      const t = timeRef.current;
 
-            // Wave parameters
-            // Amplitude grows with volume
-            const amplitude = (activeState ? 10 + (vol * 50) : 5) * (1 - i * 0.2); 
-            const frequency = 0.005 + (i * 0.002);
-            const phase = t * (2 + i) + (i * 10);
-            
-            // The "Reach" determines how thick the silk band is
-            const currentReach = (activeState ? maxReach * vol : 10) + (Math.sin(t + i)*5);
+      // Clear Canvas
+      ctx.clearRect(0, 0, w, h);
 
-            if (edge === 'top') {
-                ctx.moveTo(0, 0);
-                for (let x = 0; x <= width; x += 20) {
-                    const y = Math.sin(x * frequency + phase) * amplitude + (Math.sin(x * frequency * 2 + t) * amplitude * 0.5);
-                    // Bias y downwards
-                    ctx.lineTo(x, Math.abs(y) + (currentReach * (Math.sin(x/width * Math.PI)))); 
-                }
-                ctx.lineTo(width, 0);
-                ctx.closePath();
-            } else if (edge === 'bottom') {
-                ctx.moveTo(0, height);
-                for (let x = 0; x <= width; x += 20) {
-                    const y = Math.sin(x * frequency + phase) * amplitude;
-                    ctx.lineTo(x, height - (Math.abs(y) + (currentReach * (Math.sin(x/width * Math.PI)))));
-                }
-                ctx.lineTo(width, height);
-                ctx.closePath();
-            } else if (edge === 'left') {
-                ctx.moveTo(0, 0);
-                for (let y = 0; y <= height; y += 20) {
-                    const x = Math.sin(y * frequency + phase) * amplitude;
-                    ctx.lineTo(Math.abs(x) + (currentReach * (Math.sin(y/height * Math.PI))), y);
-                }
-                ctx.lineTo(0, height);
-                ctx.closePath();
-            } else if (edge === 'right') {
-                ctx.moveTo(width, 0);
-                for (let y = 0; y <= height; y += 20) {
-                    const x = Math.sin(y * frequency + phase) * amplitude;
-                    ctx.lineTo(width - (Math.abs(x) + (currentReach * (Math.sin(y/height * Math.PI)))), y);
-                }
-                ctx.lineTo(width, height);
-                ctx.closePath();
-            }
+      // 2. Draw Layers
+      WAVE_LAYERS.forEach((layer, i) => {
+        ctx.fillStyle = layer.color;
+        
+        ctx.beginPath();
+        ctx.moveTo(0, h);
 
-            ctx.fill();
+        const vertexCount = 40; // More points for smoother curves
+        const step = w / vertexCount;
+
+        for (let x = 0; x <= w + step; x += step) {
+          // Noise inputs
+          const noise = getWaveHeight(x, t * layer.speed * 100, layer.freq, 4);
+          
+          // Amplitude calculation
+          // Base idle breathing + volume reaction
+          const idleAmp = 30; 
+          const activeAmp = vol * 400 * layer.ampScale;
+          const currentAmp = idleAmp + activeAmp;
+          
+          // Bell curve mask: Waves are high in center, low at edges
+          const centerBias = Math.pow(Math.sin((x / w) * Math.PI), 1.5); 
+          
+          const yBase = h - (h * 0.15); // Anchor point
+          const yNoise = noise * currentAmp * centerBias;
+          const yLift = vol * 100 * centerBias; // Lift entire wave up when loud
+          
+          ctx.lineTo(x, yBase + yNoise - yLift + layer.yOffset);
         }
-      };
 
-      drawEdge('top');
-      drawEdge('bottom');
-      drawEdge('left');
-      drawEdge('right');
+        ctx.lineTo(w, h);
+        ctx.closePath();
+        ctx.fill();
+      });
+
+      // 3. Ambient Glow (Bottom Center)
+      // Adds a sense of depth/light source
+      if (vol > 0.05) {
+        const glowRadius = 300 + (vol * 400);
+        const glowAlpha = Math.min(vol * 0.3, 0.4);
+        const grad = ctx.createRadialGradient(w/2, h + 100, 0, w/2, h + 100, glowRadius);
+        grad.addColorStop(0, `rgba(139, 92, 246, ${glowAlpha})`);
+        grad.addColorStop(1, 'rgba(0,0,0,0)');
+        
+        ctx.globalCompositeOperation = 'screen';
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, h - glowRadius, w, glowRadius);
+        ctx.globalCompositeOperation = 'source-over';
+      }
 
       frameRef.current = requestAnimationFrame(draw);
     };
@@ -149,10 +138,15 @@ const Visualizer: React.FC<VisualizerProps> = ({ state }) => {
   }, [state]);
 
   return (
-    <canvas 
-      ref={canvasRef} 
-      className="absolute inset-0 pointer-events-none z-20 mix-blend-screen" 
-    />
+    <div className="fixed inset-0 z-0 pointer-events-none">
+       {/* 
+          Increased blur to 100px for maximum "silk/aurora" effect.
+          Scale-y-125 ensures the bottom edge is hidden.
+       */}
+       <div className="absolute inset-0 w-full h-full blur-[100px] scale-y-125 translate-y-20 mix-blend-screen opacity-90">
+          <canvas ref={canvasRef} className="w-full h-full" />
+       </div>
+    </div>
   );
 };
 

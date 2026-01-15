@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
-import { createAudioBlob, base64ToUint8Array, pcmToAudioBuffer } from '../services/audioUtils';
+import { createAudioBlob, base64ToUint8Array, pcmToAudioBuffer, downsampleTo16k } from '../services/audioUtils';
 import { VoiceName, ChatMessage, TranscriptState } from '../types';
 
 interface UseLiveSessionProps {
@@ -67,14 +67,20 @@ export const useLiveSession = ({ onVisualizerUpdate }: UseLiveSessionProps) => {
   const connect = useCallback(async (voiceName: VoiceName, systemInstruction: string) => {
     try {
       setError(null);
-      // Don't clear history here, allow it to persist per session until refresh
       currentInputRef.current = '';
       currentOutputRef.current = '';
       setRealtimeTranscript({ user: '', ai: '' });
 
-      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      // Initialize Audio Contexts
+      // Note: We don't force sampleRate here because some browsers ignore it. 
+      // We handle resampling in the processor.
+      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       
+      // Critical: Resume contexts in case they are suspended
+      await inputCtx.resume();
+      await outputCtx.resume();
+
       inputContextRef.current = inputCtx;
       outputContextRef.current = outputCtx;
       nextStartTimeRef.current = 0;
@@ -92,7 +98,6 @@ export const useLiveSession = ({ onVisualizerUpdate }: UseLiveSessionProps) => {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName } },
           },
           systemInstruction: systemInstruction,
-          // Enable transcription
           inputAudioTranscription: {},
           outputAudioTranscription: {},
         },
@@ -112,13 +117,16 @@ export const useLiveSession = ({ onVisualizerUpdate }: UseLiveSessionProps) => {
             processor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
               
-              // Visualizer RMS
+              // 1. Calculate Volume for Visualizer
               let sum = 0;
               for(let i=0; i<inputData.length; i++) sum += inputData[i] * inputData[i];
               const rms = Math.sqrt(sum / inputData.length);
               onVisualizerUpdate(rms * 5, false);
 
-              const blob = createAudioBlob(inputData);
+              // 2. Downsample to 16kHz for Gemini
+              // Using inputCtx.sampleRate ensures we handle 44.1k/48k correctly
+              const downsampledData = downsampleTo16k(inputData, inputCtx.sampleRate);
+              const blob = createAudioBlob(downsampledData);
               
               if (sessionPromiseRef.current) {
                 sessionPromiseRef.current.then(session => {
@@ -133,7 +141,6 @@ export const useLiveSession = ({ onVisualizerUpdate }: UseLiveSessionProps) => {
           onmessage: async (msg: LiveServerMessage) => {
             const serverContent = msg.serverContent;
             
-            // 1. Handle Transcription (Live Updates)
             if (serverContent?.inputTranscription?.text) {
               currentInputRef.current += serverContent.inputTranscription.text;
               setRealtimeTranscript(prev => ({ ...prev, user: currentInputRef.current }));
@@ -143,7 +150,6 @@ export const useLiveSession = ({ onVisualizerUpdate }: UseLiveSessionProps) => {
               setRealtimeTranscript(prev => ({ ...prev, ai: currentOutputRef.current }));
             }
 
-            // 2. Handle Turn Completion (Commit transcripts to history)
             if (serverContent?.turnComplete) {
               const userText = currentInputRef.current.trim();
               const aiText = currentOutputRef.current.trim();
@@ -155,17 +161,14 @@ export const useLiveSession = ({ onVisualizerUpdate }: UseLiveSessionProps) => {
                    if (aiText) newItems.push({ role: 'ai', text: aiText, timestamp: Date.now() });
                    return [...prev, ...newItems];
                  });
-                 // Clear buffers
                  currentInputRef.current = '';
                  currentOutputRef.current = '';
-                 // Also clear live transcript display smoothly
                  setTimeout(() => {
                     setRealtimeTranscript({ user: '', ai: '' });
                  }, 1000);
               }
             }
 
-            // 3. Handle Audio Output
             const base64Audio = serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64Audio && outputContextRef.current) {
               const ctx = outputContextRef.current;
@@ -202,7 +205,6 @@ export const useLiveSession = ({ onVisualizerUpdate }: UseLiveSessionProps) => {
                 activeSourcesRef.current.clear();
                 nextStartTimeRef.current = 0;
                 onVisualizerUpdate(0, false);
-                // Reset transcripts on interrupt
                 currentOutputRef.current = '';
                 setRealtimeTranscript(prev => ({ ...prev, ai: '' }));
             }
@@ -213,7 +215,7 @@ export const useLiveSession = ({ onVisualizerUpdate }: UseLiveSessionProps) => {
           },
           onerror: (err) => {
             console.error('Gemini Live Error', err);
-            setError("连接中断，请重试");
+            setError("网络连接中断，请检查权限或重试");
             disconnect();
           }
         }

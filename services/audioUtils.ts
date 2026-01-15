@@ -1,6 +1,40 @@
 import { Blob } from '@google/genai';
 
-// Convert Float32Array (from AudioContext) to Int16Array (PCM)
+// Downsample any sample rate to 16000Hz
+export function downsampleTo16k(
+  buffer: Float32Array,
+  sampleRate: number
+): Float32Array {
+  if (sampleRate === 16000) {
+    return buffer;
+  }
+  const conversionRatio = sampleRate / 16000;
+  const newLength = Math.round(buffer.length / conversionRatio);
+  const result = new Float32Array(newLength);
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * conversionRatio);
+    // Simple averaging (boxcar filter) for downsampling
+    let accum = 0,
+      count = 0;
+    for (
+      let i = offsetBuffer;
+      i < nextOffsetBuffer && i < buffer.length;
+      i++
+    ) {
+      accum += buffer[i];
+      count++;
+    }
+    result[offsetResult] = count > 0 ? accum / count : 0;
+    offsetResult++;
+    offsetBuffer = nextOffsetBuffer;
+  }
+  return result;
+}
+
+// Convert Float32Array to Int16Array (PCM)
 export function floatTo16BitPCM(float32Array: Float32Array): ArrayBuffer {
   const buffer = new ArrayBuffer(float32Array.length * 2);
   const view = new DataView(buffer);
