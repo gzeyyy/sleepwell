@@ -1,0 +1,7 @@
+{
+  "name": "Somnium - 梦境伴侣",
+  "description": "一款高端沉浸式AI语音哄睡应用，使用实时生成音频助您入眠。",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
